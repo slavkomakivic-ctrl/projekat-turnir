@@ -1,3 +1,5 @@
 *.db 
 __pycache__/ 
 .env 
+test_scenario.py 
+test_runde.py 
