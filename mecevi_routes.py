@@ -65,11 +65,11 @@ def prikazi_zrijeb():
 @router.post("/sledeci_krug")
 def napravi_sledeci_krug():
     
-    kursor.execute("SELECT MAX(runda) FROM mecevi")
+    kursor.execute("SELECT MAX(runda) FROM mecevi WHERE faza='nokaut'")
     trenutna_runda = kursor.fetchone()[0]
     
     kursor.execute(
-        "SELECT COUNT(*) FROM mecevi WHERE runda = ? AND status != 'Zavrsen'",
+        "SELECT COUNT(*) FROM mecevi WHERE faza='nokaut' AND runda = ? AND status != 'Zavrsen'",
         (trenutna_runda,)
     )
     nezavrseni = kursor.fetchone()[0]
@@ -78,7 +78,7 @@ def napravi_sledeci_krug():
         raise HTTPException(status_code=400, detail="Nisu svi mecevi ove runde zavrseni")
     
     kursor.execute(
-        "SELECT pobjednik FROM mecevi WHERE runda = ?",
+        "SELECT pobjednik FROM mecevi WHERE faza='nokaut' AND runda = ?",
         (trenutna_runda,)
     )
     pobjednici = [p[0] for p in kursor.fetchall()]
@@ -87,7 +87,15 @@ def napravi_sledeci_krug():
         return {"poruka": f"Turnir zavrsen! Pobjednik: {pobjednici[0]}"}
 
     nova_runda = trenutna_runda +1
-    novi_mecevi = napravi_parove_i_mecevi(pobjednici, nova_runda)
+    novi_mecevi = []
+    for i in range(0, len(pobjednici) - 1, 2):
+        kursor.execute(
+            "INSERT INTO mecevi (ekipa1_id, ekipa2_id, status, runda, faza) VALUES (?, ?, ?, ?, ?)",
+            (pobjednici[i], pobjednici[i+1], "Ceka", nova_runda, "nokaut")
+        )
+        mec_id = kursor.lastrowid
+        napravi_prazne_setove(mec_id)
+        novi_mecevi.append((pobjednici[i], pobjednici[i+1]))
     
     konekcija.commit()
     return {"poruka": f"Runda {nova_runda} kreirana", "mecevi": novi_mecevi}
