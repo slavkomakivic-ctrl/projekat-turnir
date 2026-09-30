@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import OAuth2PasswordRequestForm
+from psycopg2.errors import UniqueViolation
 from database import kursor1, konekcija1
 from models import Korisnik
 from auth import hesuj_lozinku, provjeri_lozinku, napravi_token
@@ -10,17 +11,24 @@ router = APIRouter()
 @router.post("/registracija")
 def registruj_korisnika(korisnik: Korisnik):
     hash_lozinke = hesuj_lozinku(korisnik.lozinka)
-    kursor1.execute(
-        "INSERT INTO korisnici (korisnicko_ime, lozinka_hash) VALUES (?, ?)",
-        (korisnik.korisnicko_ime, hash_lozinke)
-    )
-    konekcija1.commit()
+    try:
+        kursor1.execute(
+            "INSERT INTO korisnici (korisnicko_ime, lozinka_hash) VALUES (%s, %s)",
+            (korisnik.korisnicko_ime, hash_lozinke)
+        )
+        konekcija1.commit()
+    except UniqueViolation:
+        konekcija1.rollback()
+        raise HTTPException(status_code=409, detail="Korisnicko ime je vec zauzeto.")
+    except Exception:
+        konekcija1.rollback()
+        raise
     return {"poruka": f"Registrovan korisnik: {korisnik.korisnicko_ime}"}
 
 @router.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
     kursor1.execute(
-        "SELECT lozinka_hash FROM korisnici WHERE korisnicko_ime = ?",
+        "SELECT lozinka_hash FROM korisnici WHERE korisnicko_ime = %s",
         (form_data.username,)
     )
     red = kursor1.fetchone()
@@ -35,3 +43,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
     token = napravi_token(form_data.username)
     return {"access_token": token, "token_type": "bearer"}
+
+@router.get("/provjeri_prijavu")
+def provjeri_prijavu(korisnik: str = Depends(trenutni_korisnik)):
+    return {"korisnicko_ime": korisnik}

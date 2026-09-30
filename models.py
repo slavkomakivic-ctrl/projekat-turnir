@@ -42,3 +42,5 @@ class Setovi(BaseModel):
     poeni_ekipa1: int = Field(default=0)
     poeni_ekipa2: int = Field(default=0)
     zavrsen_set: bool = Field(default=False)
+    poen_ekipa: int | None = Field(default=None, ge=1, le=2)
+    servirajuca_ekipa: int | None = Field(default=None, ge=1, le=2)

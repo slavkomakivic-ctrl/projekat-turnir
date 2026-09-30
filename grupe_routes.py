@@ -1,9 +1,10 @@
-import sqlite3
+import psycopg2
 import random
 from fastapi import APIRouter, HTTPException, Depends
 from database import kursor, konekcija
 from models import Turnir
 from mecevi_routes import napravi_parove_i_mecevi
+from auth_dependency import trenutni_korisnik
 
 router = APIRouter()
 
@@ -66,7 +67,7 @@ def preporuka():
 
 
 @router.post("/napravi_grupe")
-def napravi_grupe():
+def napravi_grupe(korisnik: str = Depends(trenutni_korisnik)):
     kursor.execute("SELECT broj_terena, trajanje_meca FROM turnir WHERE id = 1")
     red = kursor.fetchone()
     
@@ -93,14 +94,14 @@ def napravi_grupe():
     pokazivac = 0
     for i, velicina in enumerate(velicine):
         naziv_grupe = f"Grupa {chr(65 + i)}"  # A, B, C...
-        kursor.execute("INSERT INTO grupe (naziv) VALUES (?)", (naziv_grupe,))
-        grupa_id = kursor.lastrowid
+        kursor.execute("INSERT INTO grupe (naziv) VALUES (%s) RETURNING id", (naziv_grupe,))
+        grupa_id = kursor.fetchone()[0]
 
         ekipe_u_grupi = id_ekipa[pokazivac: pokazivac + velicina]
         pokazivac += velicina
 
         for ekipa_id in ekipe_u_grupi:
-            kursor.execute("UPDATE ekipa SET grupa_id = ? WHERE id = ?", (grupa_id, ekipa_id))
+            kursor.execute("UPDATE ekipa SET grupa_id = %s WHERE id = %s", (grupa_id, ekipa_id))
 
     konekcija.commit()
     return {"poruka": "Grupe napravljene", "detalji": format_}
@@ -119,8 +120,8 @@ def prikazi_grupe():
 def napravi_prazne_setove(mec_id):
     for broj in [1, 2, 3]:
         kursor.execute(
-            "INSERT INTO setovi (mec_id, broj_seta, poeni_ekipa1, poeni_ekipa2, zavrsen_set) VALUES (?, ?, ?, ?, ?)",
-            (mec_id, broj, 0, 0, False)
+            "INSERT INTO setovi (mec_id, broj_seta, poeni_ekipa1, poeni_ekipa2, zavrsen_set) VALUES (%s, %s, %s, %s, FALSE)",
+            (mec_id, broj, 0, 0)
         )
 def round_robin_rasporedi(ekipe):
     ekipe = ekipe[:]
@@ -139,7 +140,7 @@ def round_robin_rasporedi(ekipe):
     return kola
 
 @router.post("/napravi_meceve_grupa")
-def napravi_meceve_grupa():
+def napravi_meceve_grupa(korisnik: str = Depends(trenutni_korisnik)):
     kursor.execute("SELECT COUNT(*) FROM mecevi WHERE faza='grupna'")
     if kursor.fetchone()[0] > 0:
         raise HTTPException(status_code=400, detail="Grupni mecevi su vec napravljeni")
@@ -150,7 +151,7 @@ def napravi_meceve_grupa():
     kola_po_grupi = {}
     max_kola = 0
     for grupa_id in grupe:
-        kursor.execute("SELECT id FROM ekipa WHERE grupa_id = ?", (grupa_id,))
+        kursor.execute("SELECT id FROM ekipa WHERE grupa_id = %s", (grupa_id,))
         ekipe = [e[0] for e in kursor.fetchall()]
         kola = round_robin_rasporedi(ekipe)
         kola_po_grupi[grupa_id] = kola
@@ -162,30 +163,47 @@ def napravi_meceve_grupa():
             if kolo_broj < len(kola):
                 for ekipa1, ekipa2 in kola[kolo_broj]:
                     kursor.execute(
-                        "INSERT INTO mecevi (ekipa1_id, ekipa2_id, status, faza, grupa_id, kolo) VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO mecevi (ekipa1_id, ekipa2_id, status, faza, grupa_id, kolo) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
                         (ekipa1, ekipa2, "Ceka", "grupna", grupa_id, kolo_broj + 1)
                     )
-                    napravi_prazne_setove(kursor.lastrowid)
+                    mec_id = kursor.fetchone()[0]
+                    napravi_prazne_setove(mec_id)
 
     konekcija.commit()
     return {"poruka": "Grupni mecevi napravljeni po kolima"}
+
+@router.get("/prikazi_meceve_grupa")
+def prikazi_meceve_grupa():
+    kursor.execute("""
+        SELECT
+            g.naziv AS grupa,
+            e1.naziv AS ekipa1,
+            e2.naziv AS ekipa2
+        FROM mecevi m
+        JOIN grupe g ON m.grupa_id = g.id
+        JOIN ekipa e1 ON m.ekipa1_id = e1.id
+        JOIN ekipa e2 ON m.ekipa2_id = e2.id
+        WHERE m.faza = 'grupna'
+        ORDER BY g.id, m.id
+    """)
+    return {"mecevi": kursor.fetchall()}
 
 def napravi_seeded_osminu(prvi_mjesto, drugo_mjesto):
     n = len(prvi_mjesto)
     parovi = []
     for i in range(n):
-        protivnik_drugog = drugo_mjesto[n - 1 - i]  # A1 protiv H2, B1 protiv G2...
+        protivnik_drugog = drugo_mjesto[n - 1 - i]  
         parovi.append((prvi_mjesto[i], protivnik_drugog))
     return parovi
 
 def izracunaj_tabelu_grupe(grupa_id):
-    kursor.execute("SELECT id FROM ekipa WHERE grupa_id = ?", (grupa_id,))
+    kursor.execute("SELECT id FROM ekipa WHERE grupa_id = %s", (grupa_id,))
     ekipe = [e[0] for e in kursor.fetchall()]
 
     tabela = {e: {"pobjede": 0, "setovi_izgubljeni": 0, "poena_primljeno": 0} for e in ekipe}
 
     kursor.execute(
-        "SELECT id, ekipa1_id, ekipa2_id, pobjednik FROM mecevi WHERE faza='grupna' AND grupa_id=? AND status='Zavrsen'",
+        "SELECT id, ekipa1_id, ekipa2_id, pobjednik FROM mecevi WHERE faza='grupna' AND grupa_id=%s AND status='Zavrsen'",
         (grupa_id,)
     )
     for mec_id, e1, e2, pobjednik in kursor.fetchall():
@@ -193,7 +211,7 @@ def izracunaj_tabelu_grupe(grupa_id):
             tabela[pobjednik]["pobjede"] += 1
 
         kursor.execute(
-            "SELECT poeni_ekipa1, poeni_ekipa2 FROM setovi WHERE mec_id=? AND zavrsen_set=1",
+            "SELECT poeni_ekipa1, poeni_ekipa2 FROM setovi WHERE mec_id=%s AND zavrsen_set=TRUE",
             (mec_id,)
         )
         for p1, p2 in kursor.fetchall():
@@ -215,7 +233,18 @@ def tabela_grupe(grupa_id: int):
     return {"tabela": izracunaj_tabelu_grupe(grupa_id)}
 
 @router.post("/napravi_nokaut_iz_grupa")
-def napravi_nokaut_iz_grupa():
+def napravi_nokaut_iz_grupa(korisnik: str = Depends(trenutni_korisnik)):
+    kursor.execute("SELECT COUNT(*) FROM mecevi WHERE faza='grupna'")
+    ukupno_grupnih = kursor.fetchone()[0]
+    kursor.execute("SELECT COUNT(*) FROM mecevi WHERE faza='grupna' AND status='Zavrsen'")
+    zavrseni_grupni = kursor.fetchone()[0]
+    if zavrseni_grupni < ukupno_grupnih:
+        raise HTTPException(status_code=400, detail="Nisu zavrseni svi grupni mecevi") 
+    
+    kursor.execute("SELECT COUNT(*) FROM mecevi WHERE faza='nokaut'")
+    if kursor.fetchone()[0] > 0:
+        raise HTTPException(status_code=400, detail="Nokaut mecevi su vec napravljeni")
+    
     kursor.execute("SELECT id FROM grupe")
     grupe = [g[0] for g in kursor.fetchall()]
 
@@ -231,34 +260,75 @@ def napravi_nokaut_iz_grupa():
     novi_mecevi = []
     for ekipa1, ekipa2 in parovi:
         kursor.execute(
-            "INSERT INTO mecevi (ekipa1_id, ekipa2_id, status, runda, faza) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO mecevi (ekipa1_id, ekipa2_id, status, runda, faza) VALUES (%s, %s, %s, %s, %s) RETURNING id",
             (ekipa1, ekipa2, "Ceka", 1, "nokaut")
         )
-        mec_id = kursor.lastrowid
+        mec_id = kursor.fetchone()[0]
         napravi_prazne_setove(mec_id)
         novi_mecevi.append((ekipa1, ekipa2))
     konekcija.commit()
     return {"poruka": "Nokaut faza kreirana", "mecevi": novi_mecevi}
 
 @router.post("/generisi_raspored")
-def generisi_raspored():
+def generisi_raspored(korisnik: str = Depends(trenutni_korisnik)):
+    kursor.execute("SELECT COUNT(*) FROM raspored")
+    if kursor.fetchone()[0] > 0:
+        raise HTTPException(status_code=400, detail="Raspored grupne faze je vec formiran.")
+    
     kursor.execute("SELECT broj_terena, trajanje_meca, dan_turnira FROM turnir WHERE id=1")
     broj_terena, trajanje, dan = kursor.fetchone()
 
     kursor.execute("SELECT id FROM mecevi WHERE faza='grupna' ORDER BY kolo, id")
     mecevi = [m[0] for m in kursor.fetchall()]
 
-    pocetak_min = 11 * 60  # 11:00, prilagodi po potrebi
+    pocetak_min = 10 * 60  # 10:00, prilagodi po potrebi
     for slot, mec_id in enumerate(mecevi):
         teren = (slot % broj_terena) + 1
         vrijeme_min = pocetak_min + (slot // broj_terena) * trajanje
         vrijeme = f"{vrijeme_min // 60:02d}:{vrijeme_min % 60:02d}"
         kursor.execute(
-            "INSERT INTO raspored (mec_id, teren, vrijeme_pocetka) VALUES (?, ?, ?)",
+            "INSERT INTO raspored (mec_id, teren, vrijeme_pocetka) VALUES (%s, %s, %s)",
             (mec_id, teren, vrijeme)
         )
     konekcija.commit()
     return {"poruka": "Raspored generisan"}
+
+
+@router.post("/azuriraj_raspored")
+def azuriraj_raspored(korisnik: str = Depends(trenutni_korisnik)):
+    kursor.execute("SELECT COUNT(*) FROM mecevi WHERE faza='nokaut' AND status='Ceka'")
+    if kursor.fetchone()[0] == 0:
+        raise HTTPException(status_code=400, detail="Nokaut mecevi jos nisu kreirani")
+
+    kursor.execute("SELECT broj_terena, trajanje_meca, dan_turnira FROM turnir WHERE id=1")
+    broj_terena, trajanje, dan = kursor.fetchone()
+
+    kursor.execute("SELECT vrijeme_pocetka FROM raspored ORDER BY mec_id DESC")
+    vrijeme_zadnjeg_grupnog = kursor.fetchone()[0]
+    if vrijeme_zadnjeg_grupnog is None:
+        raise HTTPException(status_code=400, detail="Nema rasporeda grupne faze za azuriranje")
+    
+    sat, minut = map(int, vrijeme_zadnjeg_grupnog.split(":"))
+    
+    kursor.execute("SELECT id FROM mecevi WHERE faza='nokaut' AND status='Ceka'")
+    nokaut_mecevi = [m[0] for m in kursor.fetchall()]
+
+    pocetak_minuta = sat * 60 + minut + 15
+    for slot, mec_id in enumerate(nokaut_mecevi):
+
+        kursor.execute("SELECT COUNT(*) FROM raspored WHERE mec_id = %s", (mec_id,))
+        if kursor.fetchone()[0] > 0:
+            continue
+
+        teren = (slot % broj_terena) + 1
+        vrijeme_min = pocetak_minuta + (slot // broj_terena) * trajanje
+        vrijeme = f"{vrijeme_min // 60:02d}:{vrijeme_min % 60:02d}"
+        kursor.execute(
+            "INSERT INTO raspored (mec_id, teren, vrijeme_pocetka) VALUES (%s, %s, %s)",
+            (mec_id, teren, vrijeme)
+        )
+    konekcija.commit()
+    return {"poruka": "Raspored azuriran sa nokaut mecevima"}
 
 @router.get("/prikazi_raspored_grupa")
 def prikazi_raspored_grupa():
@@ -268,11 +338,36 @@ def prikazi_raspored_grupa():
         e1.naziv AS ekipa1_naziv,
         e2.naziv AS ekipa2_naziv,
         r.teren,
-        r.vrijeme_pocetka AS vrijeme
+        r.vrijeme_pocetka AS vrijeme,
+        m.status,
+        m.servirajuca_ekipa
     FROM mecevi m
     JOIN raspored r ON m.id = r.mec_id
     JOIN ekipa e1 ON m.ekipa1_id = e1.id
     JOIN ekipa e2 ON m.ekipa2_id = e2.id;
     """)
     raspored = kursor.fetchall()
-    return {"raspored": raspored}
+    kursor.execute("SELECT broj_terena FROM turnir WHERE id = 1")
+    konfiguracija = kursor.fetchone()
+    broj_terena = konfiguracija[0] if konfiguracija else 0
+    mecevi_u_toku = sum(1 for mec in raspored if mec[5] == "U_toku")
+    return {
+        "raspored": raspored,
+        "broj_terena": broj_terena,
+        "mecevi_u_toku": mecevi_u_toku
+    }
+
+@router.get("/prikazi_uzivo")
+def prikazi_uzivo():
+    kursor.execute("""
+        SELECT r.teren, m.id, e1.naziv, e2.naziv, s.broj_seta,
+             s.poeni_ekipa1, s.poeni_ekipa2, m.status, m.servirajuca_ekipa
+        FROM setovi s
+        JOIN mecevi m ON s.mec_id = m.id
+        JOIN raspored r ON r.mec_id = m.id
+        JOIN ekipa e1 ON m.ekipa1_id = e1.id
+        JOIN ekipa e2 ON m.ekipa2_id = e2.id
+        WHERE m.status = 'U_toku'
+        ORDER BY m.id, s.broj_seta
+    """)
+    return {"uzivo": kursor.fetchall()}

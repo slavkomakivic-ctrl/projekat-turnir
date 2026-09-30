@@ -1,7 +1,8 @@
-import sqlite3
+import psycopg2
 from fastapi import APIRouter, HTTPException
 from database import kursor, konekcija
 from models import Ucesnik, Ekipa
+from psycopg2.errors import UniqueViolation
 
 router = APIRouter()
 
@@ -9,14 +10,14 @@ router = APIRouter()
 def prijava_ekipe(podaci: Ekipa):
     try:
         kursor.execute(
-            "INSERT INTO ekipa (naziv, grad, kontakt) VALUES (?, ?, ?)",
+            "INSERT INTO ekipa (naziv, grad, kontakt) VALUES (%s, %s, %s) RETURNING id",
             (podaci.naziv, podaci.grad, podaci.kontakt)
         )
-        ekipa_id = kursor.lastrowid
+        ekipa_id = kursor.fetchone()[0]
 
         for clan in podaci.clanovi:
             kursor.execute(
-                "INSERT INTO imena_ucesnika (ekipa_id, ime) VALUES (?, ?)",
+                "INSERT INTO imena_ucesnika (ekipa_id, ime) VALUES (%s, %s)",
                 (ekipa_id, clan.ime)
             )
 
@@ -28,9 +29,12 @@ def prijava_ekipe(podaci: Ekipa):
         else:
             poruka = "clana"
         return {"poruka": f"Ekipa {podaci.naziv} je prijavljena sa {broj_clanova} {poruka}."}
-    except sqlite3.IntegrityError as e:
+    except UniqueViolation:
         konekcija.rollback()
-        raise HTTPException(status_code=400, detail=f"Greska pri registraciji: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Greska pri registraciji: Ekipa sa tim nazivom ili kontaktom vec postoji")
+    except Exception:
+       konekcija.rollback()
+       raise
 
 @router.get("/prikazi_ekipe")
 def prikazi_ekipe():
