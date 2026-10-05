@@ -273,11 +273,12 @@ def napravi_nokaut_iz_grupa(korisnik: str = Depends(trenutni_korisnik)):
 def generisi_raspored(korisnik: str = Depends(trenutni_korisnik)):
     try:
         kursor.execute("SELECT COUNT(*) FROM raspored")
+        if kursor.fetchone()[0] > 0:
+            raise HTTPException(status_code=400, detail="Raspored grupne faze je vec formiran.")
     except Exception:
         raise HTTPException(status_code=400, detail="Tabela rasporeda je prazna.")
     
-    if kursor.fetchone()[0] > 0:
-        raise HTTPException(status_code=400, detail="Raspored grupne faze je vec formiran.")
+    
     
         
     kursor.execute("SELECT broj_terena, trajanje_meca FROM turnir WHERE id=1")
