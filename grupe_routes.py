@@ -271,12 +271,17 @@ def napravi_nokaut_iz_grupa(korisnik: str = Depends(trenutni_korisnik)):
 
 @router.post("/generisi_raspored")
 def generisi_raspored(korisnik: str = Depends(trenutni_korisnik)):
-    kursor.execute("SELECT COUNT(*) FROM raspored")
+    try:
+        kursor.execute("SELECT COUNT(*) FROM raspored")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Tabela rasporeda je prazna.")
+    
     if kursor.fetchone()[0] > 0:
         raise HTTPException(status_code=400, detail="Raspored grupne faze je vec formiran.")
     
-    kursor.execute("SELECT broj_terena, trajanje_meca, dan_turnira FROM turnir WHERE id=1")
-    broj_terena, trajanje, dan = kursor.fetchone()
+        
+    kursor.execute("SELECT broj_terena, trajanje_meca FROM turnir WHERE id=1")
+    broj_terena, trajanje = kursor.fetchone()
 
     kursor.execute("SELECT id FROM mecevi WHERE faza='grupna' ORDER BY kolo, id")
     mecevi = [m[0] for m in kursor.fetchall()]
@@ -300,8 +305,8 @@ def azuriraj_raspored(korisnik: str = Depends(trenutni_korisnik)):
     if kursor.fetchone()[0] == 0:
         raise HTTPException(status_code=400, detail="Nokaut mecevi jos nisu kreirani")
 
-    kursor.execute("SELECT broj_terena, trajanje_meca, dan_turnira FROM turnir WHERE id=1")
-    broj_terena, trajanje, dan = kursor.fetchone()
+    kursor.execute("SELECT broj_terena, trajanje_meca FROM turnir WHERE id=1")
+    broj_terena, trajanje = kursor.fetchone()
 
     kursor.execute("SELECT vrijeme_pocetka FROM raspored ORDER BY mec_id DESC")
     vrijeme_zadnjeg_grupnog = kursor.fetchone()[0]
